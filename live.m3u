@@ -1,0 +1,29 @@
+#EXTM3U
+#EXTINF:-1 tvg-logo="",CCTV-1
+https://ali-m-l.cztv.com/channels/lantian/channel006/1080p.m3u8
+#EXTINF:-1 tvg-logo="",CCTV-2
+https://ali-m-l.cztv.com/channels/lantian/channel004/1080p.m3u8
+#EXTINF:-1 tvg-logo="",CCTV-3
+https://ali-m-l.cztv.com/channels/lantian/channel008/1080p.m3u8
+#EXTINF:-1 tvg-logo="",CCTV-4
+https://ali-m-l.cztv.com/channels/lantian/channel007/1080p.m3u8
+#EXTINF:-1 tvg-logo="",CCTV-5
+https://ali-m-l.cztv.com/channels/lantian/channel010/1080p.m3u8
+#EXTINF:-1 tvg-logo="",CCTV-6
+https://ali-m-l.cztv.com/channels/lantian/channel003/1080p.m3u8
+#EXTINF:-1 tvg-logo="",CCTV-7
+https://ali-m-l.cztv.com/channels/lantian/channel002/1080p.m3u8
+#EXTINF:-1 tvg-logo="",CCTV-8
+https://0472.org/hls/cgtn.m3u8
+#EXTINF:-1 tvg-logo="",CCTV-9
+https://0472.org/hls/cgtnd.m3u8
+#EXTINF:-1 tvg-logo="",CCTV-10
+https://0472.org/hls/cgtne.m3u8
+#EXTINF:-1 tvg-logo="",CCTV-11
+https://0472.org/hls/cgtnf.m3u8
+#EXTINF:-1 tvg-logo="",CCTV-12
+https://0472.org/hls/cgtnx.m3u8
+#EXTINF:-1 tvg-logo="",CCTV-13
+https://0472.org/hls/cgtna.m3u8
+#EXTINF:-1 tvg-logo="",CCTV-14
+https://ali-m-l.cztv.com/channels/lantian/channel012/1080p.m3u8
