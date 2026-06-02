@@ -1,8 +1,8 @@
-name: 自动更新直播源（修复超时版）
+name: 自动更新直播源（M3U转TXT版）
 
 on:
   schedule:
-    - cron: '0 0 * * *' # 每天 UTC 0点运行 (北京时间早上8点)
+    - cron: '0 0 * * *' 
   workflow_dispatch:
 
 permissions:
@@ -11,12 +11,10 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # 关键修改1：移除 timeout-minutes: 10，使用系统默认超时 (通常是360分钟)
-    # 或者显式设置更长的时间，防止脚本被强制切断
-    timeout-minutes: 60 
+    # 防止超时取消，限制为 60 分钟
+    timeout-minutes: 60
 
     steps:
-    # 关键修改2：使用 @v4 并显式指定 node-version，解决 Node.js 20/24 警告
     - name: 检出代码
       uses: actions/checkout@v4
       with:
@@ -25,81 +23,66 @@ jobs:
     - name: 初始化环境
       run: |
         sudo apt-get update
-        sudo apt-get install -y curl ffmpeg dos2unix
+        sudo apt-get install -y curl dos2unix
 
-    # 关键修改3：[核心优化] 动态生成源列表，只取 TOP 500 条
-    # 如果不限制数量，测速会极其缓慢。这里只取前500个最快源，足以满足需求。
-    - name: 抓取并整理源列表
+    # 步骤1: 获取源列表 (可以是 .m3u 或 .txt)
+    - name: 获取源文件
       run: |
-        echo "开始抓取源..."
-        # 假设您的 sources.txt 是通过某些生成的，这里做一个示例
-        # 如果您有自己的抓取逻辑，请保留，只需确保生成 sources.txt 即可
-        # 如果没有，这里使用一个公开的聚合源作为示例
+        echo "开始获取源文件..."
+        
+        # 如果您的仓库里已经有 sources.txt 或 sources.m3u，可以注释掉下面这行
+        # 这里使用示例源（包含 M3U 格式）
         curl -sL "https://raw.githubusercontent.com/fanmingming/live/main/tv/m3u/ipv6.m3u" -o sources.txt
         
-        # 去除空行和注释，只保留 http/https 开头的行
-        grep -E '^http' sources.txt > temp.txt && mv temp.txt sources.txt
-        
-        echo "当前源数量: $(wc -l < sources.txt)"
-        
-        # [关键优化] 限制源数量
-        # 如果源太多，测速必超时。这里只取前 500 行进行测速
-        head -n 500 sources.txt > sources_final.txt
-        mv sources_final.txt sources.txt
-        echo "优化后源数量: $(wc -l < sources.txt)"
+        # 统计原始行数
+        echo "原始文件行数: $(wc -l < sources.txt)"
 
-    # 关键修改4：[核心优化] 使用优化参数进行测速
-    # 即使没有安装 iptv-check，我们用 curl 配合脚本模拟测速过滤
-    - name: 去重 + 快速测速过滤
+    # 步骤2: 【核心功能】解析 M3U/TXT 并提取链接
+    - name: 解析并提取链接
       run: |
-        echo "开始快速测速（并发低，超时短）..."
+        # 提取以 http 或 https 开头的行
+        # 这一行命令会自动过滤掉 M3U 中的 #EXTINF 信息和空行，只保留 URL
+        grep -iE '^http' sources.txt > raw_urls.txt
         
-        # 创建结果文件
-        > result.txt
+        # 去重
+        sort -u raw_urls.txt > unique_urls.txt
         
-        # 使用 xargs 进行并发请求测试
-        # -P 10: 同时开启 10 个进程 (低并发，稳定)
-        # -n 1: 每次处理 1 个 URL
-        # --max-procs: 限制最大进程数
-        # curl -m 3: 每个请求最多等 3 秒，超时即放弃
-        # curl -s: 静默模式
-        # curl -o /dev/null: 不下载内容，只看状态码
-        # grep "200": 只有返回 200 状态码的才写入结果
+        echo "去重后链接数量: $(wc -l < unique_urls.txt)"
         
-        cat sources.txt | xargs -P 10 -I {} sh -c '
-          url="{}"
-          if curl -m 3 -s -o /dev/null -w "%{http_code}" "$url" | grep -q "200"; then
-            echo "$url" >> result.txt
+        # 【性能优化】限制测速数量，防止超时
+        # 只取前 600 个唯一链接进行测速
+        head -n 600 unique_urls.txt > check_list.txt
+
+    # 步骤3: 快速测速并生成 live.txt
+    - name: 测速并生成 live.txt
+      run: |
+        echo "开始测速..."
+        > live.txt
+        
+        # 循环读取链接并测试
+        # -P 15: 15个并发，避免拥堵
+        # -m 3: 3秒超时，慢的源直接丢弃
+        cat check_list.txt | xargs -P 15 -I {} sh -c '
+          if curl -m 3 -s -o /dev/null -w "%{http_code}" "{}" | grep -q "200"; then
+            echo "{}" >> live.txt
           fi
         '
         
-        echo "可用源数量: $(wc -l < result.txt)"
-        
-        # 如果结果为空，至少保留原文件的前10个作为保底
-        if [ ! -s result.txt ]; then
-          echo "未检测到可用源，保留默认保底源"
-          head -n 10 sources.txt > result.txt
+        echo "最终可用源数量: $(wc -l < live.txt)"
+
+        # 如果结果为空，保留保底源
+        if [ ! -s live.txt ]; then
+          echo "未测通，使用保底源"
+          head -n 10 check_list.txt > live.txt
         fi
 
-    - name: 生成 TVBox 分类接口
-      run: |
-        # 生成 M3U 格式
-        echo "#EXTM3U" > live.m3u
-        # 给每个链接加上简单的频道名（示例）
-        i=1
-        while read -r line; do
-          echo "#EXTINF:-1 tvg-logo=\"\",CCTV-$i" >> live.m3u
-          echo "$line" >> live.m3u
-          i=$((i+1))
-        done < result.txt
-        
-        # 生成 JSON 格式
-        # 使用 jq 或者 echo 生成
-        echo '{"sites":[{"key":"live","name":"直播","type":0,"api":"csp_Live","searchable":1,"quickSearch":1,"filterable":1,"ext":"live.m3u"}]}' > config.json
-
+    # 步骤4: 提交更新
     - name: 提交更新
       run: |
         git config --global user.name "GitHub Actions Bot"
         git config --global user.email "actions@github.com"
-        git add result.txt live.m3u config.json
-        git diff --staged --quiet || git commit -m "Auto update live sources (Fixed Timeout) $(date '+%Y-%m-%d %H:%M:%S')" && git push
+        
+        # 只添加 live.txt
+        git add live.txt
+        
+        git diff --staged --quiet || git commit -m "Auto update live.txt (M3U Parsed) $(date '+%Y-%m-%d %H:%M:%S')" && git push
