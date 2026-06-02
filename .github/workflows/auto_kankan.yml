@@ -24,19 +24,49 @@ jobs:
         token: ${{ secrets.GITHUB_TOKEN }}
         fetch-depth: 0
     
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
-        cache: 'pip'  # 现在 requirements.txt 存在，可以正常使用缓存
+    - name: 安装工具
+      run: sudo apt-get install -y curl
     
-    - name: Install dependencies
+    - name: 抓取最新看看新闻直播源
+      id: fetch_kankan
       run: |
-        pip install -r requirements.txt
+        URL="https://live.kankanews.com/huikan/"
+        
+        echo "正在抓取看看新闻直播源..."
+        M3U8=$(curl -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" "$URL" \
+               | grep -Eo "https?://[a-zA-Z0-9\./_-]+\.m3u8" \
+               | head -1)
+        
+        if [ -z "$M3U8" ]; then
+          echo "❌ 未能抓取到 m3u8 地址"
+          exit 1
+        fi
+        
+        echo "✅ 抓取成功: $M3U8"
+        echo "m3u8_url=$M3U8" >> $GITHUB_OUTPUT
+        
+        echo "#EXTINF:-1 tvg-logo=\"https://live.kankanews.com/images/logo.png\",看看新闻" > kankan_temp.m3u
+        echo "$M3U8" >> kankan_temp.m3u
+        
+        echo "$M3U8" > m3u8_url.txt
     
-    - name: 抓取看看新闻
+    - name: 合并到主直播源 live.m3u
       run: |
-        python kankan_news_crawler.py
+        # 如果主文件不存在，先创建头
+        if [ ! -f live.m3u ]; then
+          echo '#EXTM3U url-tvg="https://epg.112114.xyz/ppm.xml"' > live.m3u
+        fi
+        
+        # 备份原文件
+        cp live.m3u live.m3u.backup
+        
+        # 先删除旧的看看新闻，避免重复
+        sed -i '/看看新闻/d' live.m3u
+        
+        # 追加最新源
+        cat kankan_temp.m3u >> live.m3u
+        
+        echo "✅ 已合并到 live.m3u"
     
     - name: Commit and push
       run: |
