@@ -32,35 +32,36 @@ jobs:
         run: |
           if [ ! -f sources.txt ]; then
             echo "❌ sources.txt 文件不存在"
-            echo "请在仓库根目录创建 sources.txt 文件"
-            echo "示例内容："
-            echo "  https://iptv-org.github.io/iptv/countries/cn.m3u"
-            echo "  # 这是注释"
-            echo "  https://raw.githubusercontent.com/fanmingming/live/main/tv/m3u/ipv6.m3u"
             exit 1
           fi
           echo "✅ sources.txt 文件存在"
-          echo "=== sources.txt 内容 ==="
-          cat sources.txt
 
       - name: 安装工具
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl
+          sudo apt-get install -y curl file
 
       - name: 抓取直播源
         run: |
           echo "=== 开始抓取直播源 ==="
           
-          # 清空目标文件
           > all_sources.m3u
           
-          # 抓取源（不使用 set -e，遇到错误继续执行）
           cat sources.txt | grep -v '^#' | grep -v '^$' | while read url; do
             echo "正在抓取: $url"
+            
             if curl -sfSL --connect-timeout 10 --max-time 20 "$url" > temp.m3u 2>/dev/null; then
-              echo "✅ 抓取成功: $url"
-              grep -aE '^#EXTINF|^http' temp.m3u >> all_sources.m3u
+              echo "✅ 下载成功: $url"
+              
+              file_type=$(file -b temp.m3u | cut -d, -f1)
+              echo "  文件类型: $file_type"
+              
+              if echo "$file_type" | grep -qi html; then
+                echo "  检测到 HTML 页面，尝试提取 m3u8 地址..."
+                grep -oE 'https?://[^"'\''<>[:space:]]+\.m3u8[^"'\''<>[:space:]]*' temp.m3u | head -20 >> all_sources.m3u
+              else
+                grep -aE '^#EXTINF|^http' temp.m3u >> all_sources.m3u
+              fi
             else
               echo "⚠️ 抓取失败: $url（已跳过）"
             fi
@@ -69,19 +70,19 @@ jobs:
           
           echo "=== 抓取完成 ==="
           echo "all_sources.m3u 大小: $(wc -c < all_sources.m3u) 字节"
+          echo "all_sources.m3u 行数: $(wc -l < all_sources.m3u)"
           
-          # 检查是否有内容
           if [ ! -s all_sources.m3u ]; then
             echo "⚠️ all_sources.m3u 为空"
-            echo "所有源都抓取失败，检查 live.m3u 是否存在"
             if [ -f live.m3u ]; then
               echo "✅ 保留上次的 live.m3u，不进行更新"
-              exit 0
             else
               echo "❌ 上次的 live.m3u 也不存在"
               exit 1
             fi
           fi
+          
+          echo "✅ 抓取步骤完成"
 
       - name: 去重 + 测速过滤
         run: |
@@ -89,7 +90,6 @@ jobs:
           
           echo "#EXTM3U url-tvg=\"https://epg.112114.xyz/ppm.xml\"" > live.m3u
           
-          # 去重并测速
           cat all_sources.m3u | awk 'NR%2==1{inf=$0}NR%2==0{url=$0;print inf "\n" url}' | sort -u | \
           while IFS= read -r line; do
             if [[ $line == "#EXTINF"* ]]; then
@@ -99,9 +99,9 @@ jobs:
               if curl -sf --connect-timeout 3 --max-time 5 -r 0-1000 "$url" >/dev/null 2>&1; then
                 echo "$inf" >> live.m3u
                 echo "$url" >> live.m3u
-                echo "✅ 可用: ${url:0:50}..."
+                echo "✅ 可用"
               else
-                echo "❌ 不可用: ${url:0:50}..."
+                echo "❌ 不可用"
               fi
             fi
           done
@@ -143,17 +143,11 @@ jobs:
             ]
           }
           EOF
-          
-          echo "✅ tvbox.json 生成完成"
-          cat tvbox.json
 
       - name: 提交更新
         run: |
           git config --global user.name "bang359"
           git config --global user.email "bang359@users.noreply.github.com"
-          
-          echo "=== 检查是否有变更 ==="
-          git status
           
           git add live.m3u tvbox.json
           git commit -m "✅ 直播源自动更新 $(date +'%Y-%m-%d %H:%M')" || echo "无变更，跳过提交"
