@@ -31,11 +31,12 @@ jobs:
       - name: 检查 sources.txt 文件
         run: |
           if [ ! -f sources.txt ]; then
-            echo "❌ sources.txt 文件不存在，请在仓库中创建该文件"
-            echo "sources.txt 示例格式（每行一个源 URL）："
-            echo "  https://example.com/source1.m3u"
-            echo "  # 这是注释行，会被忽略"
-            echo "  https://example.com/source2.m3u"
+            echo "❌ sources.txt 文件不存在"
+            echo "请在仓库根目录创建 sources.txt 文件"
+            echo "示例内容："
+            echo "  https://iptv-org.github.io/iptv/countries/cn.m3u"
+            echo "  # 这是注释"
+            echo "  https://raw.githubusercontent.com/fanmingming/live/main/tv/m3u/ipv6.m3u"
             exit 1
           fi
           echo "✅ sources.txt 文件存在"
@@ -43,7 +44,9 @@ jobs:
           cat sources.txt
 
       - name: 安装工具
-        run: sudo apt-get install -y curl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl
 
       - name: 抓取直播源
         run: |
@@ -52,52 +55,60 @@ jobs:
           # 清空目标文件
           > all_sources.m3u
           
-          # 抓取源
+          # 抓取源（不使用 set -e，遇到错误继续执行）
           cat sources.txt | grep -v '^#' | grep -v '^$' | while read url; do
             echo "正在抓取: $url"
-            curl -sSL --connect-timeout 8 --max-time 15 "$url" | grep -aE '^#EXTINF|^http' >> all_sources.m3u
+            if curl -sfSL --connect-timeout 10 --max-time 20 "$url" > temp.m3u 2>/dev/null; then
+              echo "✅ 抓取成功: $url"
+              grep -aE '^#EXTINF|^http' temp.m3u >> all_sources.m3u
+            else
+              echo "⚠️ 抓取失败: $url（已跳过）"
+            fi
           done
+          rm -f temp.m3u 2>/dev/null || true
           
-          echo "=== 抓取完成，文件大小: $(wc -c < all_sources.m3u) 字节 ==="
-
-      - name: 去重 + 测速过滤
-        run: |
-          echo "=== 开始去重和测速 ==="
+          echo "=== 抓取完成 ==="
+          echo "all_sources.m3u 大小: $(wc -c < all_sources.m3u) 字节"
           
-          # 检查 all_sources.m3u 是否有内容
+          # 检查是否有内容
           if [ ! -s all_sources.m3u ]; then
-            echo "⚠️ all_sources.m3u 为空，检查 live.m3u 是否存在"
+            echo "⚠️ all_sources.m3u 为空"
+            echo "所有源都抓取失败，检查 live.m3u 是否存在"
             if [ -f live.m3u ]; then
-              echo "保留上次的 live.m3u，不进行更新"
+              echo "✅ 保留上次的 live.m3u，不进行更新"
               exit 0
             else
               echo "❌ 上次的 live.m3u 也不存在"
               exit 1
             fi
           fi
+
+      - name: 去重 + 测速过滤
+        run: |
+          echo "=== 开始去重和测速 ==="
           
-          echo '#EXTM3U url-tvg="https://epg.112114.xyz/ppm.xml"' > live.m3u
+          echo "#EXTM3U url-tvg=\"https://epg.112114.xyz/ppm.xml\"" > live.m3u
           
-          # 计数器
-          success_count=0
-          total_count=0
-          
-          cat all_sources.m3u | awk 'NR%2==1{inf=$0}NR%2==0{url=$0;print inf;print url}' | sort -u | while read inf && read url; do
-            total_count=$((total_count + 1))
-            
-            if curl -sf --connect-timeout 3 --max-time 5 -r 0-1000 "$url" >/dev/null 2>&1; then
-              echo "$inf" >> live.m3u
-              echo "$url" >> live.m3u
-              success_count=$((success_count + 1))
-              echo "✅ [$success_count] $url"
+          # 去重并测速
+          cat all_sources.m3u | awk 'NR%2==1{inf=$0}NR%2==0{url=$0;print inf "\n" url}' | sort -u | \
+          while IFS= read -r line; do
+            if [[ $line == "#EXTINF"* ]]; then
+              inf="$line"
             else
-              echo "❌ 跳过不可用源: $url"
+              url="$line"
+              if curl -sf --connect-timeout 3 --max-time 5 -r 0-1000 "$url" >/dev/null 2>&1; then
+                echo "$inf" >> live.m3u
+                echo "$url" >> live.m3u
+                echo "✅ 可用: ${url:0:50}..."
+              else
+                echo "❌ 不可用: ${url:0:50}..."
+              fi
             fi
           done
           
           echo "=== 测速完成 ==="
           echo "live.m3u 大小: $(wc -c < live.m3u) 字节"
-          echo "可用频道数: $(grep -c '^#EXTINF' live.m3u)"
+          echo "可用频道数: $(grep -c '^#EXTINF' live.m3u || echo 0)"
 
       - name: 生成 TVBox 分类接口
         run: |
