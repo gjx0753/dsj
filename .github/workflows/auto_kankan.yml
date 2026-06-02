@@ -24,49 +24,106 @@ jobs:
         token: ${{ secrets.GITHUB_TOKEN }}
         fetch-depth: 0
     
+    - name: 查看仓库文件
+      run: |
+        echo "=== 仓库根目录文件列表 ==="
+        ls -la
+    
     - name: 安装工具
-      run: sudo apt-get install -y curl
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y curl dnsutils
+    
+    - name: 测试网络连接
+      run: |
+        echo "测试 DNS 解析..."
+        nslookup live.kankanews.com || echo "⚠️ DNS 解析失败"
+        
+        echo "测试 HTTPS 连接..."
+        curl -I -s --max-time 10 "https://live.kankanews.com/huikan/" || echo "⚠️ HTTPS 连接失败"
     
     - name: 抓取最新看看新闻直播源
       id: fetch_kankan
       run: |
-        URL="https://live.kankanews.com/huikan/"
+        set -x
+        set -e
         
+        URL="https://live.kankanews.com/huikan/"
         echo "正在抓取看看新闻直播源..."
-        M3U8=$(curl -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" "$URL" \
-               | grep -Eo "https?://[a-zA-Z0-9\./_-]+\.m3u8" \
-               | head -1)
+        
+        # 保存网页内容
+        curl -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" "$URL" > kankan_page.html
+        echo "网页大小: $(wc -c < kankan_page.html) 字节"
+        
+        # 如果网页太小，说明抓取失败
+        if [ $(wc -c < kankan_page.html) -lt 100 ]; then
+          echo "❌ 网页内容过小，抓取可能失败"
+          echo "网页内容:"
+          cat kankan_page.html
+          exit 1
+        fi
+        
+        # 尝试多种方式提取 m3u8 地址
+        M3U8=$(cat kankan_page.html | grep -oP 'https?://[^"'\'' <>\x60]+\.m3u8[^"'\'' <>\x60]*' | head -1)
+        
+        if [ -z "$M3U8" ]; then
+          echo "方法1失败，尝试方法2..."
+          M3U8=$(cat kankan_page.html | grep -oE 'url[" ]*[:=][" ]*["\x27]([^"\x27]+\.m3u8[^"\x27]*)["\x27]' | grep -oE 'https?://[^\s"\x27]+' | head -1)
+        fi
+        
+        if [ -z "$M3U8" ]; then
+          echo "方法2失败，尝试方法3..."
+          M3U8=$(cat kankan_page.html | grep -i 'm3u8' | grep -oE 'https?://[^"\x27<>[:space:]]+' | head -1)
+        fi
+        
+        echo "最终提取到的 m3u8 地址: $M3U8"
         
         if [ -z "$M3U8" ]; then
           echo "❌ 未能抓取到 m3u8 地址"
+          echo "网页前 1000 字符:"
+          head -c 1000 kankan_page.html
           exit 1
         fi
         
         echo "✅ 抓取成功: $M3U8"
         echo "m3u8_url=$M3U8" >> $GITHUB_OUTPUT
         
-        echo "#EXTINF:-1 tvg-logo=\"https://live.kankanews.com/images/logo.png\",看看新闻" > kankan_temp.m3u
+        echo "#EXTINF:-1 tvg-logo=\"https://live.kankanews.com/html5/images/logo.png\",看看新闻" > kankan_temp.m3u
         echo "$M3U8" >> kankan_temp.m3u
         
         echo "$M3U8" > m3u8_url.txt
+        ls -la kankan_temp.m3u m3u8_url.txt
     
     - name: 合并到主直播源 live.m3u
       run: |
-        # 如果主文件不存在，先创建头
+        echo "=== 检查 live.m3u 文件 ==="
         if [ ! -f live.m3u ]; then
-          echo '#EXTM3U url-tvg="https://epg.112114.xyz/ppm.xml"' > live.m3u
+          echo "live.m3u 不存在，创建新文件"
+          echo "#EXTM3U url-tvg=\"https://epg.112114.xyz/ppm.xml\"" > live.m3u
         fi
         
-        # 备份原文件
-        cp live.m3u live.m3u.backup
+        if [ ! -f kankan_temp.m3u ]; then
+          echo "❌ kankan_temp.m3u 不存在"
+          exit 1
+        fi
         
-        # 先删除旧的看看新闻，避免重复
+        cp live.m3u live.m3u.backup 2>/dev/null || true
         sed -i '/看看新闻/d' live.m3u
-        
-        # 追加最新源
         cat kankan_temp.m3u >> live.m3u
         
-        echo "✅ 已合并到 live.m3u"
+        echo "✅ 合并完成"
+        tail -20 live.m3u
+    
+    - name: 上传调试文件
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: debug-files
+        path: |
+          kankan_page.html
+          kankan_temp.m3u
+          m3u8_url.txt
+        retention-days: 7
     
     - name: Commit and push
       run: |
