@@ -3,8 +3,8 @@ name: 自动抓取看看新闻 + 合并到主直播源
 on:
   workflow_dispatch:
   schedule:
-    # 每天北京时间晚上8点运行
-      - cron: '0 12 * * *'
+    # 每天北京时间晚上8点运行 (UTC 12:00)
+    - cron: '0 12 * * *'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -29,74 +29,82 @@ jobs:
         echo "=== 仓库根目录文件列表 ==="
         ls -la
     
-    - name: 安装工具
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y curl dnsutils
-    
-    - name: 测试网络连接
-      run: |
-        echo "测试 DNS 解析..."
-        nslookup live.kankanews.com || echo "⚠️ DNS 解析失败"
-        
-        echo "测试 HTTPS 连接..."
-        curl -I -s --max-time 10 "https://live.kankanews.com/huikan/" || echo "⚠️ HTTPS 连接失败"
-    
     - name: 抓取最新看看新闻直播源
       id: fetch_kankan
       run: |
         set -x
-        set -e
         
         URL="https://live.kankanews.com/huikan/"
         echo "正在抓取看看新闻直播源..."
         
-        # 保存网页内容
-        curl -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" "$URL" > kankan_page.html
+        # 使用更完整的浏览器请求头
+        curl -s -L \
+          -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+          -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8" \
+          -H "Accept-Language: zh-CN,zh;q=0.9,en;q=0.8" \
+          -H "Referer: https://www.kankanews.com/" \
+          -H "Connection: keep-alive" \
+          --connect-timeout 15 \
+          --max-time 30 \
+          "$URL" > kankan_page.html
+        
+        # 显示网页大小和前500字符用于调试
         echo "网页大小: $(wc -c < kankan_page.html) 字节"
+        echo "=== 网页前 500 字符 ==="
+        head -c 500 kankan_page.html
+        echo ""
         
         # 如果网页太小，说明抓取失败
         if [ $(wc -c < kankan_page.html) -lt 100 ]; then
           echo "❌ 网页内容过小，抓取可能失败"
-          echo "网页内容:"
-          cat kankan_page.html
           exit 1
         fi
         
-        # 尝试多种方式提取 m3u8 地址
-        M3U8=$(cat kankan_page.html | grep -oP 'https?://[^"'\'' <>\x60]+\.m3u8[^"'\'' <>\x60]*' | head -1)
+        # 方法1: 使用扩展正则提取 .m3u8 URL
+        M3U8=$(grep -oE 'https?://[^"'\''[:space:]]+\.m3u8[^"'\''[:space:]]*' kankan_page.html | head -1)
         
+        # 方法2: 查找 JSON 中的 url 字段
         if [ -z "$M3U8" ]; then
           echo "方法1失败，尝试方法2..."
-          M3U8=$(cat kankan_page.html | grep -oE 'url[" ]*[:=][" ]*["\x27]([^"\x27]+\.m3u8[^"\x27]*)["\x27]' | grep -oE 'https?://[^\s"\x27]+' | head -1)
+          M3U8=$(grep -oE 'url["[:space:]]*[:=]["[:space:]]*["\x27][^"\x27]+\.m3u8[^"\x27]*["\x27]' kankan_page.html | \
+                  grep -oE 'https?://[^"'\''[:space:]]+' | head -1)
         fi
         
+        # 方法3: 任何包含 m3u8 的 URL
         if [ -z "$M3U8" ]; then
           echo "方法2失败，尝试方法3..."
-          M3U8=$(cat kankan_page.html | grep -i 'm3u8' | grep -oE 'https?://[^"\x27<>[:space:]]+' | head -1)
+          M3U8=$(grep -i 'm3u8' kankan_page.html | \
+                  grep -oE 'https?://[^"'\''<>[:space:]]+' | head -1)
         fi
         
-        echo "最终提取到的 m3u8 地址: $M3U8"
+        echo "=== 提取结果 ==="
+        echo "m3u8 地址: $M3U8"
         
         if [ -z "$M3U8" ]; then
           echo "❌ 未能抓取到 m3u8 地址"
-          echo "网页前 1000 字符:"
-          head -c 1000 kankan_page.html
+          echo "=== 完整网页内容 ==="
+          cat kankan_page.html
           exit 1
         fi
         
         echo "✅ 抓取成功: $M3U8"
         echo "m3u8_url=$M3U8" >> $GITHUB_OUTPUT
         
+        # 创建临时 m3u 条目
         echo "#EXTINF:-1 tvg-logo=\"https://live.kankanews.com/html5/images/logo.png\",看看新闻" > kankan_temp.m3u
         echo "$M3U8" >> kankan_temp.m3u
         
+        # 保存 URL 用于调试
         echo "$M3U8" > m3u8_url.txt
-        ls -la kankan_temp.m3u m3u8_url.txt
+        
+        echo "=== 生成的文件 ==="
+        cat kankan_temp.m3u
     
     - name: 合并到主直播源 live.m3u
       run: |
         echo "=== 检查 live.m3u 文件 ==="
+        
+        # 如果 live.m3u 不存在，创建基础结构
         if [ ! -f live.m3u ]; then
           echo "live.m3u 不存在，创建新文件"
           echo "#EXTM3U url-tvg=\"https://epg.112114.xyz/ppm.xml\"" > live.m3u
@@ -107,12 +115,27 @@ jobs:
           exit 1
         fi
         
+        # 备份原文件
         cp live.m3u live.m3u.backup 2>/dev/null || true
-        sed -i '/看看新闻/d' live.m3u
+        
+        # 删除旧的看看新闻条目（包括下一行的 URL）
+        sed -i '/#EXTINF:.*看看新闻/,+1d' live.m3u
+        
+        # 追加新条目
         cat kankan_temp.m3u >> live.m3u
         
         echo "✅ 合并完成"
-        tail -20 live.m3u
+        echo "=== live.m3u 最后 10 行 ==="
+        tail -10 live.m3u
+    
+    - name: 验证 m3u8 可用性
+      continue-on-error: true
+      run: |
+        if [ -f m3u8_url.txt ]; then
+          M3U8_URL=$(cat m3u8_url.txt)
+          echo "测试 m3u8 可访问性: $M3U8_URL"
+          curl -I -s --max-time 10 "$M3U8_URL" || echo "⚠️ m3u8 测试失败（可能需要特定 referer）"
+        fi
     
     - name: 上传调试文件
       if: failure()
@@ -123,12 +146,22 @@ jobs:
           kankan_page.html
           kankan_temp.m3u
           m3u8_url.txt
+          live.m3u.backup
         retention-days: 7
     
     - name: Commit and push
       run: |
         git config user.name "${{ github.actor }}"
         git config user.email "${{ github.actor }}@users.noreply.github.com"
+        
+        # 检查是否有更改
+        if git diff --quiet && git diff --staged --quiet; then
+          echo "✅ 无更改，跳过提交"
+          exit 0
+        fi
+        
         git add .
-        git commit -m "自动更新看看新闻 [skip ci]" || echo "无更改"
+        git commit -m "自动更新看看新闻直播源 [skip ci]"
         git push
+        
+        echo "✅ 已推送到远程仓库"
