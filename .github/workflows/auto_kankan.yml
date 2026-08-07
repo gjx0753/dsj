@@ -24,81 +24,84 @@ jobs:
         token: ${{ secrets.GITHUB_TOKEN }}
         fetch-depth: 0
     
-    - name: 查看仓库文件
-      run: |
-        echo "=== 仓库根目录文件列表 ==="
-        ls -la
+    - name: 设置 Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
     
-    - name: 抓取最新看看新闻直播源
+    - name: 安装 Puppeteer
+      run: |
+        npm init -y
+        npm install puppeteer
+    
+    - name: 使用 Puppeteer 抓取直播源
       id: fetch_kankan
       run: |
-        set -x
+        cat > fetch_m3u8.js << 'EOF'
+        const puppeteer = require('puppeteer');
         
-        URL="https://live.kankanews.com/huikan/"
-        echo "正在抓取看看新闻直播源..."
+        (async () => {
+          const browser = await puppeteer.launch({
+            headless: 'new',
+            args: ['--no-sandbox', '--disable-setuid-sandbox']
+          });
+          
+          const page = await browser.newPage();
+          await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+          
+          console.log('正在访问页面...');
+          await page.goto('https://live.kankanews.com/huikan/', {
+            waitUntil: 'networkidle2',
+            timeout: 30000
+          });
+          
+          // 等待内容加载
+          await page.waitForSelector('video, source, [src*=".m3u8"]', { timeout: 10000 }).catch(() => {
+            console.log('未找到 video/source 标签，尝试其他方式...');
+          });
+          
+          // 提取 m3u8 地址
+          const m3u8Url = await page.evaluate(() => {
+            // 方法1: 查找 video 标签中的 source
+            const video = document.querySelector('video');
+            if (video) {
+              const source = video.querySelector('source[src*=".m3u8"]');
+              if (source) return source.src;
+              if (video.src && video.src.includes('.m3u8')) return video.src;
+            }
+            
+            // 方法2: 查找所有包含 .m3u8 的元素
+            const allElements = document.querySelectorAll('[src*=".m3u8"], [href*=".m3u8"]');
+            if (allElements.length > 0) {
+              return allElements[0].src || allElements[0].href;
+            }
+            
+            // 方法3: 在页面 HTML 中查找
+            const html = document.documentElement.innerHTML;
+            const match = html.match(/https?:\/\/[^"'\s<>]+\.m3u8[^"'\s<>]*/);
+            return match ? match[0] : null;
+          });
+          
+          await browser.close();
+          
+          if (m3u8Url) {
+            console.log('找到 m3u8:', m3u8Url);
+            require('fs').writeFileSync('m3u8_url.txt', m3u8Url);
+            
+            // 创建 M3U 条目
+            const m3uContent = `#EXTINF:-1 tvg-logo="https://live.kankanews.com/html5/images/logo.png",看看新闻\n${m3u8Url}\n`;
+            require('fs').writeFileSync('kankan_temp.m3u', m3uContent);
+            
+            // 输出到 GitHub Actions
+            require('fs').appendFileSync(process.env.GITHUB_OUTPUT, `m3u8_url=${m3u8Url}\n`);
+          } else {
+            console.error('未找到 m3u8 地址');
+            process.exit(1);
+          }
+        })();
+        EOF
         
-        # 使用更完整的浏览器请求头
-        curl -s -L \
-          -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-          -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8" \
-          -H "Accept-Language: zh-CN,zh;q=0.9,en;q=0.8" \
-          -H "Referer: https://www.kankanews.com/" \
-          -H "Connection: keep-alive" \
-          --connect-timeout 15 \
-          --max-time 30 \
-          "$URL" > kankan_page.html
-        
-        # 显示网页大小和前500字符用于调试
-        echo "网页大小: $(wc -c < kankan_page.html) 字节"
-        echo "=== 网页前 500 字符 ==="
-        head -c 500 kankan_page.html
-        echo ""
-        
-        # 如果网页太小，说明抓取失败
-        if [ $(wc -c < kankan_page.html) -lt 100 ]; then
-          echo "❌ 网页内容过小，抓取可能失败"
-          exit 1
-        fi
-        
-        # 方法1: 使用扩展正则提取 .m3u8 URL
-        M3U8=$(grep -oE 'https?://[^"'\''[:space:]]+\.m3u8[^"'\''[:space:]]*' kankan_page.html | head -1)
-        
-        # 方法2: 查找 JSON 中的 url 字段
-        if [ -z "$M3U8" ]; then
-          echo "方法1失败，尝试方法2..."
-          M3U8=$(grep -oE 'url["[:space:]]*[:=]["[:space:]]*["\x27][^"\x27]+\.m3u8[^"\x27]*["\x27]' kankan_page.html | \
-                  grep -oE 'https?://[^"'\''[:space:]]+' | head -1)
-        fi
-        
-        # 方法3: 任何包含 m3u8 的 URL
-        if [ -z "$M3U8" ]; then
-          echo "方法2失败，尝试方法3..."
-          M3U8=$(grep -i 'm3u8' kankan_page.html | \
-                  grep -oE 'https?://[^"'\''<>[:space:]]+' | head -1)
-        fi
-        
-        echo "=== 提取结果 ==="
-        echo "m3u8 地址: $M3U8"
-        
-        if [ -z "$M3U8" ]; then
-          echo "❌ 未能抓取到 m3u8 地址"
-          echo "=== 完整网页内容 ==="
-          cat kankan_page.html
-          exit 1
-        fi
-        
-        echo "✅ 抓取成功: $M3U8"
-        echo "m3u8_url=$M3U8" >> $GITHUB_OUTPUT
-        
-        # 创建临时 m3u 条目
-        echo "#EXTINF:-1 tvg-logo=\"https://live.kankanews.com/html5/images/logo.png\",看看新闻" > kankan_temp.m3u
-        echo "$M3U8" >> kankan_temp.m3u
-        
-        # 保存 URL 用于调试
-        echo "$M3U8" > m3u8_url.txt
-        
-        echo "=== 生成的文件 ==="
-        cat kankan_temp.m3u
+        node fetch_m3u8.js
     
     - name: 合并到主直播源 live.m3u
       run: |
@@ -128,25 +131,16 @@ jobs:
         echo "=== live.m3u 最后 10 行 ==="
         tail -10 live.m3u
     
-    - name: 验证 m3u8 可用性
-      continue-on-error: true
-      run: |
-        if [ -f m3u8_url.txt ]; then
-          M3U8_URL=$(cat m3u8_url.txt)
-          echo "测试 m3u8 可访问性: $M3U8_URL"
-          curl -I -s --max-time 10 "$M3U8_URL" || echo "⚠️ m3u8 测试失败（可能需要特定 referer）"
-        fi
-    
     - name: 上传调试文件
       if: failure()
       uses: actions/upload-artifact@v4
       with:
         name: debug-files
         path: |
-          kankan_page.html
-          kankan_temp.m3u
           m3u8_url.txt
+          kankan_temp.m3u
           live.m3u.backup
+          fetch_m3u8.js
         retention-days: 7
     
     - name: Commit and push
